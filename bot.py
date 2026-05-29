@@ -89,18 +89,31 @@ def quote_tweet(page, tweet_id, comment):
         return False
     # Quoteを選択
     quoted = False
-    for fn in [
-        lambda: page.get_by_role("menuitem", name="Quote").click(timeout=3000),
-        lambda: page.get_by_text("Quote", exact=True).last.click(timeout=3000),
-        lambda: page.get_by_text("引用する", exact=True).last.click(timeout=3000),
-    ]:
+    selectors = [
+        '[data-testid="Dropdown"] [role="menuitem"]:has-text("Quote")',
+        '[role="menuitem"]:has-text("Quote")',
+        'div[data-testid="quote"]',
+        '[role="menu"] >> text=Quote',
+    ]
+    for sel in selectors:
         try:
-            fn()
+            el = page.locator(sel).first
+            el.wait_for(state="visible", timeout=4000)
+            el.click()
             quoted = True
+            print(f"  Quoteクリック成功: {sel}")
             break
+        except Exception as e:
+            print(f"  セレクタ失敗 {sel}: {e}")
+    if not quoted:
+        # フォールバック: get_by_text
+        try:
+            page.get_by_text("Quote", exact=True).last.click(timeout=3000)
+            quoted = True
         except Exception:
             pass
     if not quoted:
+        page.screenshot(path=f"debug_noquote_{tweet_id}.png")
         print(f"  Quoteボタンなし: {tweet_id}")
         return False
     time.sleep(2)
