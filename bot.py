@@ -141,8 +141,8 @@ def main():
         print("引用するツイートなし")
         return
 
-    # CookieをSecretから読み込み
-    cookies_json = os.environ.get("X_COOKIES", "[]")
+    # CookieをSecretから読み込み（BOM除去）
+    cookies_json = os.environ.get("X_COOKIES", "[]").lstrip('﻿').strip()
     cookies = json.loads(cookies_json)
 
     with sync_playwright() as p:
