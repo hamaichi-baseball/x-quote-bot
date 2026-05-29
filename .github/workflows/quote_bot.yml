@@ -1,0 +1,45 @@
+name: X Quote Bot
+
+on:
+  schedule:
+    - cron: '0 22 * * *'   # 日本時間 07:00
+    - cron: '0 3 * * *'    # 日本時間 12:00
+    - cron: '0 11 * * *'   # 日本時間 20:00
+  workflow_dispatch:        # 手動実行も可能
+
+jobs:
+  quote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 依存パッケージインストール
+        run: |
+          pip install playwright feedparser
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: last_seen.json をキャッシュから復元
+        uses: actions/cache@v4
+        with:
+          path: last_seen.json
+          key: last-seen-${{ github.run_id }}
+          restore-keys: last-seen-
+
+      - name: ボット実行
+        env:
+          X_COOKIES: ${{ secrets.X_COOKIES }}
+        run: python bot.py
+
+      - name: デバッグ画像をアーティファクトに保存
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: debug_*.png
+          if-no-files-found: ignore
