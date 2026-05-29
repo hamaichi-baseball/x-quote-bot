@@ -90,24 +90,26 @@ def quote_tweet(page, tweet_id, comment):
     except PWTimeoutError:
         print(f"  リポストボタンなし: {tweet_id}")
         return False
-    # Quoteを選択
+    # Quoteを選択 (JSで全menuitems検索)
     quoted = False
-    # menuitems を全て取得して "Quote" を含むものをクリック
     try:
-        items = page.locator('[role="menuitem"]')
-        count = items.count()
-        print(f"  メニューアイテム数: {count}")
-        for i in range(count):
-            item = items.nth(i)
-            txt = item.inner_text()
-            print(f"  メニュー[{i}]: {txt!r}")
-            if "Quote" in txt or "引用" in txt:
-                item.click()
-                quoted = True
-                print(f"  Quoteクリック成功: インデックス {i}")
-                break
+        result = page.evaluate("""() => {
+            const items = document.querySelectorAll('[role="menuitem"]');
+            for (const el of items) {
+                if (el.textContent.includes('Quote') || el.textContent.includes('引用')) {
+                    el.click();
+                    return el.textContent.trim();
+                }
+            }
+            return null;
+        }""")
+        if result:
+            quoted = True
+            print(f"  JSでQuoteクリック成功: {result!r}")
+        else:
+            print(f"  JSでQuoteが見つからず")
     except Exception as e:
-        print(f"  menuitem列挙失敗: {e}")
+        print(f"  JS実行失敗: {e}")
     if not quoted:
         page.screenshot(path=f"debug_noquote_{tweet_id}.png")
         print(f"  Quoteボタンなし: {tweet_id}")
