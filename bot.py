@@ -67,6 +67,9 @@ def fetch_new_tweets(account, last_seen_id):
                 if not tid or tid == last_seen_id:
                     break
                 text = re.sub(r"<[^>]+>", "", e.get("summary", e.get("title", "")))
+                # 返信（@から始まる）やリツイート（RT @）はスキップ
+                if text.lstrip().startswith("@") or text.lstrip().startswith("RT @"):
+                    continue
                 new.append((tid, text))
             print(f"[{account}] {instance} から {len(new)} 件取得")
             return new
@@ -89,29 +92,22 @@ def quote_tweet(page, tweet_id, comment):
         return False
     # Quoteを選択
     quoted = False
-    selectors = [
-        '[data-testid="Dropdown"] [role="menuitem"]:has-text("Quote")',
-        '[role="menuitem"]:has-text("Quote")',
-        'div[data-testid="quote"]',
-        '[role="menu"] >> text=Quote',
-    ]
-    for sel in selectors:
-        try:
-            el = page.locator(sel).first
-            el.wait_for(state="visible", timeout=4000)
-            el.click()
-            quoted = True
-            print(f"  Quoteクリック成功: {sel}")
-            break
-        except Exception as e:
-            print(f"  セレクタ失敗 {sel}: {e}")
-    if not quoted:
-        # フォールバック: get_by_text
-        try:
-            page.get_by_text("Quote", exact=True).last.click(timeout=3000)
-            quoted = True
-        except Exception:
-            pass
+    # menuitems を全て取得して "Quote" を含むものをクリック
+    try:
+        items = page.locator('[role="menuitem"]')
+        count = items.count()
+        print(f"  メニューアイテム数: {count}")
+        for i in range(count):
+            item = items.nth(i)
+            txt = item.inner_text()
+            print(f"  メニュー[{i}]: {txt!r}")
+            if "Quote" in txt or "引用" in txt:
+                item.click()
+                quoted = True
+                print(f"  Quoteクリック成功: インデックス {i}")
+                break
+    except Exception as e:
+        print(f"  menuitem列挙失敗: {e}")
     if not quoted:
         page.screenshot(path=f"debug_noquote_{tweet_id}.png")
         print(f"  Quoteボタンなし: {tweet_id}")
