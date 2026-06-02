@@ -117,18 +117,39 @@ def quote_tweet(page, account, tweet_id, comment):
         print(f"  テキスト入力失敗: {e}")
         return False
 
-    # 投稿ボタンをクリック
-    try:
-        post_btn = page.locator('[data-testid="tweetButton"]').first
-        post_btn.wait_for(state="visible", timeout=5000)
-        post_btn.click()
-        time.sleep(3)
-        print(f"  引用完了: {tweet_id} / {comment}")
-        return True
-    except PWTimeoutError:
+    # 投稿ボタンをクリック（複数セレクタを試す）
+    posted = False
+    for sel in ['[data-testid="tweetButtonInline"]', '[data-testid="tweetButton"]']:
+        try:
+            btn = page.locator(sel).first
+            btn.wait_for(state="visible", timeout=4000)
+            btn.click()
+            posted = True
+            break
+        except Exception:
+            pass
+    if not posted:
+        # JSフォールバック
+        try:
+            r = page.evaluate("""() => {
+                for (const sel of ['[data-testid="tweetButtonInline"]','[data-testid="tweetButton"]']) {
+                    const b = document.querySelector(sel);
+                    if (b) { b.click(); return sel; }
+                }
+                return null;
+            }""")
+            if r:
+                posted = True
+                print(f"  JSで投稿ボタンクリック: {r}")
+        except Exception:
+            pass
+    if not posted:
         print(f"  投稿ボタンなし: {tweet_id}")
         page.screenshot(path=f"debug_nopost_{tweet_id}.png")
         return False
+    time.sleep(3)
+    print(f"  引用完了: {tweet_id} / {comment}")
+    return True
 
 def main():
     seen = load_seen()
