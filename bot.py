@@ -3,6 +3,7 @@ X 引用ポスト自動化ボット（GitHub Actions版）
 - Nitter RSSで新着ツイートを検知
 - Playwrightのheadless ChromeでXに引用ポスト
 - CookieはGitHub Secretsから読み込み
+- ツイートURLをコンポーズに直接入力して引用投稿
 """
 import json, os, re, random, logging, time, feedparser
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
@@ -77,62 +78,56 @@ def fetch_new_tweets(account, last_seen_id):
             print(f"[{account}] {instance} 失敗: {ex}")
     return []
 
-def quote_tweet(page, tweet_id, comment):
-    page.goto(f"https://x.com/i/status/{tweet_id}", wait_until="domcontentloaded")
-    time.sleep(4)
-    # リポストボタン
+def quote_tweet(page, account, tweet_id, comment):
+    """
+    ツイートURLをコンポーズボックスに入力して引用投稿する。
+    ドロップダウン操作不要 = 確実に動作する。
+    """
+    tweet_url = f"https://x.com/{account}/status/{tweet_id}"
+    post_text = f"{comment}\n{tweet_url}"
+
+    # ホームに戻ってコンポーズエリアをクリック
+    page.goto("https://x.com/home", wait_until="domcontentloaded")
+    time.sleep(3)
+
     try:
-        btn = page.locator('[data-testid="retweet"]').first
-        btn.wait_for(state="visible", timeout=10000)
-        btn.click()
-        time.sleep(2)
-        page.screenshot(path=f"debug_{tweet_id}.png")
-    except PWTimeoutError:
-        print(f"  リポストボタンなし: {tweet_id}")
-        return False
-    # Quoteを選択 (JSで全menuitems検索)
-    quoted = False
-    try:
-        result = page.evaluate("""() => {
-            const items = document.querySelectorAll('[role="menuitem"]');
-            for (const el of items) {
-                if (el.textContent.includes('Quote') || el.textContent.includes('引用')) {
-                    el.click();
-                    return el.textContent.trim();
-                }
-            }
-            return null;
-        }""")
-        if result:
-            quoted = True
-            print(f"  JSでQuoteクリック成功: {result!r}")
-        else:
-            print(f"  JSでQuoteが見つからず")
-    except Exception as e:
-        print(f"  JS実行失敗: {e}")
-    if not quoted:
-        page.screenshot(path=f"debug_noquote_{tweet_id}.png")
-        print(f"  Quoteボタンなし: {tweet_id}")
-        return False
-    time.sleep(2)
-    # テキスト入力
-    try:
-        box = page.locator('[data-testid="tweetTextarea_0"]').first
-        box.wait_for(state="visible", timeout=8000)
-        box.click()
-        box.fill(comment)
+        # コンポーズエリア（ポストボタン or テキストエリア）
+        compose = page.locator('[data-testid="tweetTextarea_0"]').first
+        compose.wait_for(state="visible", timeout=10000)
+        compose.click()
         time.sleep(1)
     except PWTimeoutError:
-        print(f"  テキストエリアなし: {tweet_id}")
-        return False
-    # 投稿
+        # フォールバック: 「ポスト」ボタンからコンポーズ画面を開く
+        try:
+            page.locator('[data-testid="SideNav_NewTweet_Button"]').first.click(timeout=5000)
+            time.sleep(2)
+            compose = page.locator('[data-testid="tweetTextarea_0"]').first
+            compose.wait_for(state="visible", timeout=8000)
+        except PWTimeoutError:
+            print(f"  コンポーズエリアが開けません: {tweet_id}")
+            page.screenshot(path=f"debug_nocompose_{tweet_id}.png")
+            return False
+
+    # テキスト入力（ハッシュタグ + ツイートURL）
     try:
-        page.locator('[data-testid="tweetButton"]').first.click(timeout=5000)
+        compose.fill(post_text)
+        time.sleep(1)
+        page.screenshot(path=f"debug_{tweet_id}.png")
+    except Exception as e:
+        print(f"  テキスト入力失敗: {e}")
+        return False
+
+    # 投稿ボタンをクリック
+    try:
+        post_btn = page.locator('[data-testid="tweetButton"]').first
+        post_btn.wait_for(state="visible", timeout=5000)
+        post_btn.click()
         time.sleep(3)
         print(f"  引用完了: {tweet_id} / {comment}")
         return True
     except PWTimeoutError:
         print(f"  投稿ボタンなし: {tweet_id}")
+        page.screenshot(path=f"debug_nopost_{tweet_id}.png")
         return False
 
 def main():
@@ -175,9 +170,9 @@ def main():
         total = 0
         for account, tid, txt in targets:
             print(f"[{account}] 引用中: {tid}")
-            if quote_tweet(page, tid, generate_comment(txt)):
+            if quote_tweet(page, account, tid, generate_comment(txt)):
                 total += 1
-            time.sleep(3)
+            time.sleep(5)
 
         browser.close()
     print(f"完了: {total} 件引用")
