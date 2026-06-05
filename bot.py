@@ -17,6 +17,36 @@ MAX_PER_ACCOUNT   = 1       # アカウントあたり最大1件
 SEEN_FILE         = "last_seen.json"
 FOLLOWING_FILE    = "following.json"
 
+# 野球関連キーワード（これを1つ以上含む投稿のみ引用）
+BASEBALL_KEYWORDS = [
+    # 試合・結果
+    "野球", "プロ野球", "ベースボール", "baseball", "Baseball",
+    # チーム・リーグ
+    "マリーンズ", "ロッテ", "巨人", "阪神", "ソフトバンク", "オリックス",
+    "西武", "楽天", "日本ハム", "DeNA", "中日", "広島", "ヤクルト", "ヤクルト",
+    "パ・リーグ", "パリーグ", "セ・リーグ", "セリーグ", "NPB",
+    # MLB
+    "MLB", "メジャー", "大リーグ", "ドジャース", "ヤンキース", "エンジェルス",
+    "大谷", "ダルビッシュ", "山本由伸", "鈴木誠也", "今永",
+    # プレー
+    "ホームラン", "本塁打", "HR", "ヒット", "安打", "三振", "奪三振",
+    "投球", "登板", "先発", "リリーフ", "抑え", "セーブ", "ホールド",
+    "打点", "盗塁", "タイムリー", "満塁", "サヨナラ", "逆転",
+    "完封", "完投", "ノーヒット", "パーフェクト",
+    "勝利", "敗戦", "引き分け", "連勝", "連敗",
+    "一塁", "二塁", "三塁", "本塁", "外野", "内野", "捕手", "投手", "打者",
+    # 大会・イベント
+    "日本シリーズ", "クライマックス", "CS", "オールスター",
+    "ドラフト", "キャンプ", "オープン戦", "交流戦",
+    "甲子園", "高校野球", "WBC", "プレミア12",
+    # スタジアム・チーム略称
+    "ZOZOマリン", "ペイペイ", "バンテリン", "マツダ",
+]
+
+def is_baseball_related(text):
+    """野球関連キーワードが含まれているか判定"""
+    return any(kw in text for kw in BASEBALL_KEYWORDS)
+
 # キーワード → ハッシュタグ
 KEYWORD_COMMENTS = [
     (["勝", "勝利", "サヨナラ", "逆転", "完封", "連勝"],
@@ -130,6 +160,10 @@ def fetch_new_posts(account, last_seen_id):
                 text = re.sub(r"<[^>]+>", "", e.get("summary", e.get("title", "")))
                 # 返信・RTはスキップ
                 if text.lstrip().startswith("@") or text.lstrip().startswith("RT @"):
+                    continue
+                # 野球関連でなければスキップ
+                if not is_baseball_related(text):
+                    print(f"  [{account}] 野球無関係スキップ: {text[:40]!r}")
                     continue
                 new.append((tid, text))
             if new or feed.entries:  # フィードが取れたなら成功
