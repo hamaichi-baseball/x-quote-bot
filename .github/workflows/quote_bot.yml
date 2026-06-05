@@ -2,10 +2,8 @@ name: X Quote Bot
 
 on:
   schedule:
-    - cron: '0 22 * * *'   # 日本時間 07:00
-    - cron: '0 3 * * *'    # 日本時間 12:00
-    - cron: '0 11 * * *'   # 日本時間 20:00
-  workflow_dispatch:        # 手動実行も可能
+    - cron: '*/15 * * * *'   # 15分ごとに実行（随時）
+  workflow_dispatch:           # 手動実行も可能
 
 jobs:
   quote:
@@ -24,12 +22,14 @@ jobs:
           playwright install chromium
           playwright install-deps chromium
 
-      - name: last_seen.json をキャッシュから復元
+      - name: last_seen.json / following.json をキャッシュから復元
         uses: actions/cache@v4
         with:
-          path: last_seen.json
-          key: last-seen-${{ github.run_id }}
-          restore-keys: last-seen-
+          path: |
+            last_seen.json
+            following.json
+          key: bot-state-${{ github.run_id }}
+          restore-keys: bot-state-
 
       - name: ボット実行
         env:

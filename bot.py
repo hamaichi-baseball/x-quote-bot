@@ -1,21 +1,21 @@
 """
 X 引用ポスト自動化ボット（GitHub Actions版）
-- Nitter RSSで新着ツイートを検知
-- Playwrightのheadless ChromeでXに引用ポスト
-- CookieはGitHub Secretsから読み込み
+- フォロー中アカウントをXから動的取得
+- Nitter RSSで新着ポストを検知
 - ツイートURLをコンポーズに直接入力して引用投稿
+- 15分ごとに実行（随時対応）
 """
-import json, os, re, random, logging, time, feedparser
+import json, os, re, random, time, feedparser
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 
-# 監視対象アカウント
-ACCOUNTS = ["MLBJapan", "chibalotte_pr", "DAZNJPNBaseball", "PacificleagueTV"]
+MY_USERNAME = "HamaichiChannel"
 
-NITTER_INSTANCES = ["nitter.poast.org", "nitter.privacydev.net", "lightbrd.com", "nitter.net"]
-MAX_QUOTES_PER_ACCOUNT = 2
-SEEN_FILE = "last_seen.json"
+NITTER_INSTANCES = ["nitter.net", "nitter.poast.org", "nitter.privacydev.net", "lightbrd.com"]
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+MAX_QUOTES_PER_RUN = 5      # 1回の実行で最大5件引用
+MAX_PER_ACCOUNT   = 1       # アカウントあたり最大1件
+SEEN_FILE         = "last_seen.json"
+FOLLOWING_FILE    = "following.json"
 
 # キーワード → ハッシュタグ
 KEYWORD_COMMENTS = [
@@ -42,6 +42,64 @@ def generate_comment(text):
             return random.choice(comments)
     return random.choice(DEFAULT_COMMENTS)
 
+# ──────────────────────────────────────────
+# フォロー一覧の取得・キャッシュ
+# ──────────────────────────────────────────
+def load_following():
+    if os.path.exists(FOLLOWING_FILE):
+        with open(FOLLOWING_FILE) as f:
+            return json.load(f)
+    return []
+
+def save_following(accounts):
+    with open(FOLLOWING_FILE, "w") as f:
+        json.dump(accounts, f)
+
+def fetch_following_list(page):
+    """Xのフォロー中ページをスクレイピングしてアカウント一覧を返す"""
+    print(f"フォロー一覧を取得中...")
+    page.goto(f"https://x.com/{MY_USERNAME}/following", wait_until="domcontentloaded")
+    time.sleep(4)
+
+    accounts = set()
+    for scroll_attempt in range(20):  # 最大20回スクロール（約200アカウント対応）
+        handles = page.evaluate("""() => {
+            const cells = document.querySelectorAll('[data-testid="UserCell"]');
+            const result = [];
+            for (const cell of cells) {
+                // UserCellの最初のaタグのhrefからハンドルを取得
+                const links = cell.querySelectorAll('a[href]');
+                for (const link of links) {
+                    const href = link.getAttribute('href');
+                    if (href && /^\\/[A-Za-z0-9_]{1,50}$/.test(href)) {
+                        result.push(href.slice(1));
+                        break;
+                    }
+                }
+            }
+            return result;
+        }""")
+        prev = len(accounts)
+        for h in handles:
+            accounts.add(h)
+
+        # スクロールして次を読み込む
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        time.sleep(2)
+
+        if len(accounts) == prev and scroll_attempt > 2:
+            break  # 増えなくなったら終了
+
+    # 自分自身・システムアカウントを除外
+    skip = {MY_USERNAME.lower(), "home", "explore", "notifications", "messages",
+            "search", "settings", "i", "compose"}
+    result = [h for h in accounts if h.lower() not in skip]
+    print(f"フォロー一覧取得完了: {len(result)} アカウント")
+    return result
+
+# ──────────────────────────────────────────
+# Nitter RSS から新着ポスト取得
+# ──────────────────────────────────────────
 def load_seen():
     if os.path.exists(SEEN_FILE):
         with open(SEEN_FILE) as f:
@@ -56,68 +114,67 @@ def extract_tweet_id(url):
     m = re.search(r"/status/(\d+)", url)
     return m.group(1) if m else None
 
-def fetch_new_tweets(account, last_seen_id):
+def fetch_new_posts(account, last_seen_id):
     for instance in NITTER_INSTANCES:
         try:
-            feed = feedparser.parse(f"https://{instance}/{account}/rss")
+            feed = feedparser.parse(f"https://{instance}/{account}/rss", request_headers={"User-Agent": "Mozilla/5.0"})
             if not feed.entries:
                 continue
             new = []
             for e in feed.entries:
                 tid = extract_tweet_id(e.link)
-                if not tid or tid == last_seen_id:
+                if not tid:
+                    continue
+                if tid == last_seen_id:
                     break
                 text = re.sub(r"<[^>]+>", "", e.get("summary", e.get("title", "")))
-                # 返信（@から始まる）やリツイート（RT @）はスキップ
+                # 返信・RTはスキップ
                 if text.lstrip().startswith("@") or text.lstrip().startswith("RT @"):
                     continue
                 new.append((tid, text))
-            print(f"[{account}] {instance} から {len(new)} 件取得")
-            return new
+            if new or feed.entries:  # フィードが取れたなら成功
+                return new
         except Exception as ex:
-            print(f"[{account}] {instance} 失敗: {ex}")
+            print(f"  [{account}] {instance} 失敗: {ex}")
     return []
 
+# ──────────────────────────────────────────
+# 引用投稿
+# ──────────────────────────────────────────
 def quote_tweet(page, account, tweet_id, comment):
-    """
-    ツイートURLをコンポーズボックスに入力して引用投稿する。
-    ドロップダウン操作不要 = 確実に動作する。
-    """
     tweet_url = f"https://x.com/{account}/status/{tweet_id}"
     post_text = f"{comment}\n{tweet_url}"
 
-    # ホームに戻ってコンポーズエリアをクリック
     page.goto("https://x.com/home", wait_until="domcontentloaded")
     time.sleep(3)
 
+    # コンポーズエリアを開く
+    compose = None
     try:
-        # コンポーズエリア（ポストボタン or テキストエリア）
         compose = page.locator('[data-testid="tweetTextarea_0"]').first
-        compose.wait_for(state="visible", timeout=10000)
+        compose.wait_for(state="visible", timeout=8000)
         compose.click()
         time.sleep(1)
     except PWTimeoutError:
-        # フォールバック: 「ポスト」ボタンからコンポーズ画面を開く
         try:
             page.locator('[data-testid="SideNav_NewTweet_Button"]').first.click(timeout=5000)
             time.sleep(2)
             compose = page.locator('[data-testid="tweetTextarea_0"]').first
             compose.wait_for(state="visible", timeout=8000)
         except PWTimeoutError:
-            print(f"  コンポーズエリアが開けません: {tweet_id}")
-            page.screenshot(path=f"debug_nocompose_{tweet_id}.png")
+            print(f"  コンポーズが開けません: {tweet_id}")
+            page.screenshot(path=f"debug_err_{tweet_id}.png")
             return False
 
-    # テキスト入力（ハッシュタグ + ツイートURL）
+    # テキスト入力
     try:
         compose.fill(post_text)
         time.sleep(1)
-        page.screenshot(path=f"debug_{tweet_id}.png")
     except Exception as e:
         print(f"  テキスト入力失敗: {e}")
         return False
 
-    # 投稿ボタンをクリック（複数セレクタを試す）
+    # 投稿ボタンクリック
     posted = False
     for sel in ['[data-testid="tweetButtonInline"]', '[data-testid="tweetButton"]']:
         try:
@@ -129,48 +186,38 @@ def quote_tweet(page, account, tweet_id, comment):
         except Exception:
             pass
     if not posted:
-        # JSフォールバック
         try:
             r = page.evaluate("""() => {
-                for (const sel of ['[data-testid="tweetButtonInline"]','[data-testid="tweetButton"]']) {
-                    const b = document.querySelector(sel);
-                    if (b) { b.click(); return sel; }
+                for (const s of ['[data-testid="tweetButtonInline"]','[data-testid="tweetButton"]']) {
+                    const b = document.querySelector(s);
+                    if (b) { b.click(); return s; }
                 }
                 return null;
             }""")
             if r:
                 posted = True
-                print(f"  JSで投稿ボタンクリック: {r}")
         except Exception:
             pass
+
     if not posted:
         print(f"  投稿ボタンなし: {tweet_id}")
-        page.screenshot(path=f"debug_nopost_{tweet_id}.png")
+        page.screenshot(path=f"debug_err_{tweet_id}.png")
         return False
+
     time.sleep(3)
-    print(f"  引用完了: {tweet_id} / {comment}")
+    print(f"  引用完了: @{account} / {tweet_id} / {comment}")
     return True
 
+# ──────────────────────────────────────────
+# メイン
+# ──────────────────────────────────────────
 def main():
-    seen = load_seen()
-    targets = []
-    for account in ACCOUNTS:
-        new_tweets = fetch_new_tweets(account, seen.get(account))
-        if not new_tweets:
-            print(f"[{account}] 新規なし")
-            continue
-        seen[account] = new_tweets[0][0]
-        for tid, txt in new_tweets[:MAX_QUOTES_PER_ACCOUNT]:
-            targets.append((account, tid, txt))
-    save_seen(seen)
-
-    if not targets:
-        print("引用するツイートなし")
-        return
-
     # CookieをSecretから読み込み（BOM除去）
     cookies_json = os.environ.get("X_COOKIES", "[]").lstrip('﻿').strip()
     cookies = json.loads(cookies_json)
+
+    seen = load_seen()
+    targets = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -187,7 +234,44 @@ def main():
         page.goto("https://x.com/home", wait_until="domcontentloaded")
         time.sleep(3)
         print(f"現在のURL: {page.url}")
+        if "home" not in page.url:
+            print("ログイン失敗。処理中止。")
+            browser.close()
+            return
 
+        # フォロー一覧を取得（キャッシュ済みがあれば併用、毎回更新）
+        following = fetch_following_list(page)
+        if not following:
+            following = load_following()  # フォールバック
+        if following:
+            save_following(following)
+        else:
+            print("フォロー一覧取得失敗")
+            browser.close()
+            return
+
+        # 各アカウントの新着ポストをチェック（Nitter RSS）
+        for account in following:
+            new_posts = fetch_new_posts(account, seen.get(account))
+            if not new_posts:
+                continue
+            # 最新IDを記録
+            seen[account] = new_posts[0][0]
+            for tid, txt in new_posts[:MAX_PER_ACCOUNT]:
+                targets.append((account, tid, txt))
+                if len(targets) >= MAX_QUOTES_PER_RUN:
+                    break
+            if len(targets) >= MAX_QUOTES_PER_RUN:
+                break
+
+        save_seen(seen)
+
+        if not targets:
+            print("引用するポストなし")
+            browser.close()
+            return
+
+        # 引用投稿実行
         total = 0
         for account, tid, txt in targets:
             print(f"[{account}] 引用中: {tid}")
